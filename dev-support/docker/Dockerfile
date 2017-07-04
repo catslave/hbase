@@ -47,6 +47,7 @@ RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
     libbz2-dev \
     libcurl4-openssl-dev \
     libfuse-dev \
+    libperl-critic-perl \
     libprotobuf-dev \
     libprotoc-dev \
     libsnappy-dev \
@@ -60,6 +61,8 @@ RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
     python2.7 \
     python-pip \
     rsync \
+    ruby \
+    ruby-dev \
     snappy \
     zlib1g-dev
 
@@ -125,6 +128,22 @@ RUN pip install pylint
 # Install dateutil.parser
 ####
 RUN pip install python-dateutil
+
+####
+# Disable misc ruby bits
+###
+RUN echo 'gem: --no-rdoc --no-ri' >> /root/.gemrc
+
+####
+# Install rubocop
+###
+RUN gem install rake
+RUN gem install rubocop
+
+####
+# Install ruby-lint
+###
+RUN gem install ruby-lint
 
 ###
 # Avoid out of memory errors in builds

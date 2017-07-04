@@ -1,0 +1,142 @@
+pipeline {
+  agent {
+    node {
+      label 'Hadoop'
+    }
+  }
+  // work around for YETUS-508, requires maven outside of the dockerfile
+  tools {
+    maven 'Maven (latest)'
+  }
+  triggers {
+    cron('@daily')
+  }
+  options {
+    timeout (time: 6, unit: 'HOURS')
+    timestamps()
+  }
+  environment {
+    TOOLS = "${env.WORKSPACE}/tools"
+    BASEDIR = "${env.WORKSPACE}/component"
+    YETUS_RELEASE = '0.4.0'
+  }
+  parameters {
+    booleanParam(name: 'USE_YETUS_PRERELEASE', defaultValue: false, description: '''Check to use the current HEAD of apache/yetus rather than our configured release.
+
+    Should only be used manually when e.g. there is some non-work-aroundable issue in yetus we are checking a fix for.''')
+  }
+  stages {
+    stage ('yetus check') {
+      environment {
+        OUTPUTDIR = "${env.WORKSPACE}/artifacts"
+        PROJECT = 'hbase'
+        PROJET_PERSONALITY = 'https://raw.githubusercontent.com/apache/hbase/master/dev-support/hbase-personality.sh'
+        AUTHOR_IGNORE_LIST = 'src/main/asciidoc/_chapters/developer.adoc'
+        WHITESPACE_IGNORE_LIST = '.*/generated/.*'
+        TESTS_FILTER = 'cc,checkstyle,javac,javadoc,pylint,shellcheck,whitespace,perlcritic,ruby-lint,rubocop'
+        BRANCH_SPECIFIC_DOCKERFILE = "${env.BASEDIR}/dev-support/docker/Dockerfile"
+      }
+      steps {
+    // TODO we can move the yetus install into a different stage and then use stash to deploy it.
+        sh  '''#!/usr/bin/env bash
+printenv
+echo "Ensure we have a copy of Apache Yetus."
+if [[ true !=  "${USE_YETUS_PRERELEASE}" ]]; then
+  YETUS_DIR="${WORKSPACE}/yetus-${YETUS_RELEASE}"
+  echo "Checking for Yetus ${YETUS_RELEASE} in '${YETUS_DIR}'"
+  if [ ! -d "${YETUS_DIR}" ]; then
+    echo "New download of Apache Yetus version ${YETUS_RELEASE}."
+    rm -rf "${WORKSPACE}/.gpg"
+    mkdir -p "${WORKSPACE}/.gpg"
+    chmod -R 700 "${WORKSPACE}/.gpg"
+
+    echo "install yetus project KEYS"
+    curl -L --fail -o "${WORKSPACE}/KEYS_YETUS" https://dist.apache.org/repos/dist/release/yetus/KEYS
+    gpg --homedir "${WORKSPACE}/.gpg" --import "${WORKSPACE}/KEYS_YETUS"
+
+    echo "download yetus release ${YETUS_RELEASE}"
+    curl -L --fail -O "https://dist.apache.org/repos/dist/release/yetus/${YETUS_RELEASE}/yetus-${YETUS_RELEASE}-bin.tar.gz"
+    curl -L --fail -O "https://dist.apache.org/repos/dist/release/yetus/${YETUS_RELEASE}/yetus-${YETUS_RELEASE}-bin.tar.gz.asc"
+    echo "verifying yetus release"
+    gpg --homedir "${WORKSPACE}/.gpg" --verify "yetus-${YETUS_RELEASE}-bin.tar.gz.asc"
+    mv "yetus-${YETUS_RELEASE}-bin.tar.gz" yetus.tar.gz
+  else
+    echo "Reusing cached download of Apache Yetus version ${YETUS_RELEASE}."
+  fi
+else
+  YETUS_DIR="${WORKSPACE}/yetus-git"
+  rm -rf "${YETUS_DIR}"
+  echo "downloading from github"
+  curl -L --fail https://api.github.com/repos/apache/yetus/tarball/HEAD -o yetus.tar.gz
+fi
+if [ ! -d "${YETUS_DIR}" ]; then
+  echo "unpacking yetus into '${YETUS_DIR}'"
+  mkdir -p "${YETUS_DIR}"
+  gunzip -c yetus.tar.gz | tar xpf - -C "${YETUS_DIR}" --strip-components 1
+fi
+	'''
+    // TODO we can move the personality install into a different stage and then use stash to deploy it.
+	dir ("${env.TOOLS}") {
+	  sh """#!/usr/bin/env bash
+echo "Downloading Project personality."
+curl -L  -o personality.sh "${env.PROJET_PERSONALITY}"
+	"""
+	}
+	sh '''#!/usr/bin/env bash
+YETUS_ARGS=()
+YETUS_ARGS=("--personality=${TOOLS}/personality.sh" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--basedir=${BASEDIR}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--console-urls" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--docker" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--dockerfile=${BRANCH_SPECIFIC_DOCKERFILE}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--empty-patch" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--html-report-file=${OUTPUTDIR}/console-report.html" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--jenkins" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--mvn-custom-repos" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--patch-dir=${OUTPUTDIR}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--project=${PROJECT}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--resetrepo" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--author-ignore-list=${AUTHOR_IGNORE_LIST}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--whitespace-eol-ignore-list=${WHITESPACE_IGNORE_LIST}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--whitespace-tabs-ignore-list=${WHITESPACE_IGNORE_LIST}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--sentinel" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--branch=${BRANCH_NAME}" "${YETUS_ARGS[@]}")
+YETUS_ARGS=("--tests-filter=${TESTS_FILTER}" "${YETUS_ARGS[@]}")
+
+rm -rf "${OUTPUTDIR}"
+mkdir -p "${OUTPUTDIR}"
+if [[ true !=  "${USE_YETUS_PRERELEASE}" ]]; then
+  YETUS_ARGS=("--shelldocs=${WORKSPACE}/yetus-${YETUS_RELEASE}/bin/shelldocs" "${YETUS_ARGS[@]}")
+  TESTPATCHBIN="${WORKSPACE}/yetus-${YETUS_RELEASE}/bin/test-patch"
+else
+  YETUS_ARGS=("--shelldocs=${WORKSPACE}/yetus-git/shelldocs/shelldocs.py" "${YETUS_ARGS[@]}")
+  TESTPATCHBIN="${WORKSPACE}/yetus-git/precommit/test-patch.sh"
+fi
+echo "Launching yetus with command line:"
+echo "${TESTPATCHBIN} ${YETUS_ARGS[@]}"
+
+/usr/bin/env bash "${TESTPATCHBIN}" "${YETUS_ARGS[@]}"
+	'''
+      }
+    }
+  }
+  post {
+    always {
+      archive "${env.OUTPUTDIR}"
+      archive "${env.YETUS_DIR}/VERSION"
+      // Need HTML Publisher plugin. :/
+//      publishHTML target: [
+//        allowMissing: true,
+//        keepAll: true,
+//        alwaysLinkToLastBuild: true,
+//        reportDir: "${env.OUTPUTDIR}",
+//        reportFiles: 'console-report.html',
+//        reportName: 'Nightly Build Report'
+//      ]
+    }
+    failure {
+      deleteDir()
+    }
+  }
+}
+
